@@ -9,7 +9,7 @@ on:
       - dev
       - gd
 
-# ⚠️ 添加必要的权限：允许删除 workflow runs
+# 必须添加的权限，用于删除旧的 workflow runs
 permissions:
   actions: write
   contents: read
@@ -84,32 +84,45 @@ jobs:
             git push --force
           fi
 
-      # 🧹 新增：自动清理历史运行记录，只保留最近5次
+      # ==================== 新增：自动清理历史记录，只保留最近5次 ====================
       - name: Cleanup old workflow runs (keep last 5)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # 请确认此文件名与你仓库中的实际文件名一致（通常为 update_schedule.yml）
+          # ⚠️ 请根据你的实际工作流文件名修改下面这行（通常在 .github/workflows/ 目录下）
           WORKFLOW_FILE="update_schedule.yml"
           KEEP=5
 
-          echo "Fetching completed runs for workflow: $WORKFLOW_FILE"
-          COMPLETED_RUN_IDS=$(gh run list --workflow="$WORKFLOW_FILE" --status completed --limit 100 --json databaseId --jq '.[].databaseId')
-
-          if [ -n "$COMPLETED_RUN_IDS" ]; then
-            TOTAL=$(echo "$COMPLETED_RUN_IDS" | wc -l)
-            echo "Total completed runs: $TOTAL"
-
-            if [ "$TOTAL" -gt "$KEEP" ]; then
-              DELETE_IDS=$(echo "$COMPLETED_RUN_IDS" | tail -n +$((KEEP+1)))
-              echo "Deleting runs older than the most recent $KEEP:"
-              for ID in $DELETE_IDS; do
-                echo "Deleting run $ID"
-                gh run delete "$ID" || echo "Failed to delete $ID (maybe in progress or already deleted)"
-              done
-            else
-              echo "No runs to delete, total ($TOTAL) <= keep ($KEEP)"
-            fi
-          else
-            echo "No completed runs found."
+          echo "🔍 开始清理工作流: $WORKFLOW_FILE"
+          
+          # 获取所有已完成运行的ID，若失败则跳过
+          RUN_IDS=$(gh run list --workflow="$WORKFLOW_FILE" --status completed --limit 100 --json databaseId --jq '.[].databaseId' 2>/dev/null || true)
+          
+          if [ -z "$RUN_IDS" ]; then
+            echo "✅ 没有找到已完成的历史运行记录，跳过清理。"
+            exit 0
           fi
+
+          # 统计总数
+          TOTAL=$(echo "$RUN_IDS" | wc -l)
+          echo "📊 已完成运行总数: $TOTAL"
+
+          if [ "$TOTAL" -le "$KEEP" ]; then
+            echo "✅ 运行记录总数 ($TOTAL) 未超过保留数 ($KEEP)，无需删除。"
+            exit 0
+          fi
+
+          # 计算需要删除的ID（跳过前KEEP个）
+          DELETE_IDS=$(echo "$RUN_IDS" | tail -n +$((KEEP+1)))
+
+          echo "🗑️ 准备删除以下运行ID（共 $(echo "$DELETE_IDS" | wc -l) 个）:"
+          echo "$DELETE_IDS"
+
+          # 逐个删除，忽略单个删除失败
+          for ID in $DELETE_IDS; do
+            echo "正在删除 $ID ..."
+            gh run delete "$ID" || echo "⚠️ 删除 $ID 失败，可能已不存在或权限不足，继续下一个。"
+          done
+
+          echo "✅ 清理完成。"
+      # ============================================================================
