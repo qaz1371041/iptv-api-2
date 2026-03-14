@@ -84,26 +84,37 @@ jobs:
             git push --force
           fi
 
-      # ==================== 新增：自动清理历史记录，只保留最近5次 ====================
-      - name: Cleanup old workflow runs (keep last 5)
+      # ==================== 自动清理历史记录（保留最近5次） ====================
+      - name: Cleanup old workflow runs (keep last 5) using API
         env:
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           # ⚠️ 请根据你的实际工作流文件名修改下面这行（通常在 .github/workflows/ 目录下）
           WORKFLOW_FILE="update_schedule.yml"
           KEEP=5
 
-          echo "🔍 开始清理工作流: $WORKFLOW_FILE"
+          REPO="${{ github.repository }}"
+          API_URL="https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW_FILE/runs?status=completed&per_page=100"
+
+          echo "🔍 正在从 $API_URL 获取已完成运行记录..."
+
+          # 获取所有已完成运行的ID（按最新排序）
+          RUN_JSON=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$API_URL")
           
-          # 获取所有已完成运行的ID，若失败则跳过
-          RUN_IDS=$(gh run list --workflow="$WORKFLOW_FILE" --status completed --limit 100 --json databaseId --jq '.[].databaseId' 2>/dev/null || true)
-          
-          if [ -z "$RUN_IDS" ]; then
-            echo "✅ 没有找到已完成的历史运行记录，跳过清理。"
+          # 检查API调用是否成功
+          if echo "$RUN_JSON" | grep -q "API rate limit exceeded"; then
+            echo "⚠️ API 速率限制超限，稍后重试"
             exit 0
           fi
 
-          # 统计总数
+          # 提取ID列表
+          RUN_IDS=$(echo "$RUN_JSON" | jq -r '.workflow_runs[] | .id' 2>/dev/null || true)
+
+          if [ -z "$RUN_IDS" ]; then
+            echo "✅ 没有找到已完成的历史运行记录。"
+            exit 0
+          fi
+
           TOTAL=$(echo "$RUN_IDS" | wc -l)
           echo "📊 已完成运行总数: $TOTAL"
 
@@ -118,10 +129,16 @@ jobs:
           echo "🗑️ 准备删除以下运行ID（共 $(echo "$DELETE_IDS" | wc -l) 个）:"
           echo "$DELETE_IDS"
 
-          # 逐个删除，忽略单个删除失败
+          # 逐个删除
           for ID in $DELETE_IDS; do
             echo "正在删除 $ID ..."
-            gh run delete "$ID" || echo "⚠️ 删除 $ID 失败，可能已不存在或权限不足，继续下一个。"
+            DELETE_URL="https://api.github.com/repos/$REPO/actions/runs/$ID"
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE -H "Authorization: token $GITHUB_TOKEN" "$DELETE_URL")
+            if [ "$STATUS" = "204" ]; then
+              echo "✅ 删除成功"
+            else
+              echo "⚠️ 删除失败 (HTTP $STATUS)，可能已不存在或权限不足"
+            fi
           done
 
           echo "✅ 清理完成。"
