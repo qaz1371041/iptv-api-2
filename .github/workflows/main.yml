@@ -8,12 +8,6 @@ on:
       - master
       - dev
       - gd
-
-# 必须添加的权限，用于删除旧的 workflow runs
-permissions:
-  actions: write
-  contents: read
-
 jobs:
   push:
     runs-on: ${{ matrix.operating-system }}
@@ -25,18 +19,15 @@ jobs:
       - name: Set branch name
         id: vars
         run: echo "BRANCH_NAME=${{ github.repository_owner == 'Guovin' && 'gd' || 'master' }}" >> $GITHUB_ENV
-
       - uses: actions/checkout@v3
         with:
           ref: ${{ env.BRANCH_NAME }}
-
       - name: Run with setup-python 3.13
         uses: actions/setup-python@v4
         with:
           python-version: '3.13'
           update-environment: true
           cache: 'pipenv'
-
       - name: Check open_driver config
         id: check_driver
         run: |
@@ -47,33 +38,25 @@ jobs:
           except:
             open_driver = False
           print(open_driver)')" >> $GITHUB_ENV
-
       - name: Set up Chrome
         if: env.OPEN_DRIVER == 'True'
         uses: browser-actions/setup-chrome@latest
         with:
           chrome-version: stable
-
       - name: Download chrome driver
         if: env.OPEN_DRIVER == 'True'
         uses: nanasess/setup-chromedriver@master
-
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
-
       - name: Install pipenv
         run: pip3 install --user pipenv
-
       - name: Install dependecies
         run: pipenv --python 3.13 && pipenv install --deploy
-
       - name: Install selenium
         if: env.OPEN_DRIVER == 'True'
         run: pipenv install selenium
-
       - name: Update
         run: pipenv run dev
-
       - name: Commit and push if changed
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
@@ -83,63 +66,53 @@ jobs:
             git commit -m "Github Action Auto Updated"
             git push --force
           fi
+      # 新增：清理旧的 workflow 运行记录，只保留最近的 5 条
+      - name: Cleanup old workflow runs (keep only 5)
+        if: always()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const workflow_id = context.workflow;  // 当前 workflow 文件名
+            const current_run_id = context.runId;
 
-      # ==================== 自动清理历史记录（保留最近5次） ====================
-      - name: Cleanup old workflow runs (keep last 5) using API
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          # ⚠️ 请根据你的实际工作流文件名修改下面这行（通常在 .github/workflows/ 目录下）
-          WORKFLOW_FILE="update_schedule.yml"
-          KEEP=5
+            console.log(`Fetching runs for workflow ${workflow_id}...`);
+            let runs = [];
+            let page = 1;
+            const per_page = 100;
+            let response;
 
-          REPO="${{ github.repository }}"
-          API_URL="https://api.github.com/repos/$REPO/actions/workflows/$WORKFLOW_FILE/runs?status=completed&per_page=100"
+            // 分页获取所有运行记录
+            do {
+              response = await github.rest.actions.listWorkflowRuns({
+                owner,
+                repo,
+                workflow_id,
+                per_page,
+                page
+              });
+              runs = runs.concat(response.data.workflow_runs);
+              page++;
+            } while (response.data.workflow_runs.length === per_page);
 
-          echo "🔍 正在从 $API_URL 获取已完成运行记录..."
+            // 按创建时间降序排序（最新的在前）
+            runs.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
-          # 获取所有已完成运行的ID（按最新排序）
-          RUN_JSON=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$API_URL")
-          
-          # 检查API调用是否成功
-          if echo "$RUN_JSON" | grep -q "API rate limit exceeded"; then
-            echo "⚠️ API 速率限制超限，稍后重试"
-            exit 0
-          fi
+            // 保留前 5 条，删除其余
+            const runsToDelete = runs.slice(5);
+            console.log(`Total runs: ${runs.length}, keeping 5, deleting ${runsToDelete.length} runs.`);
 
-          # 提取ID列表
-          RUN_IDS=$(echo "$RUN_JSON" | jq -r '.workflow_runs[] | .id' 2>/dev/null || true)
-
-          if [ -z "$RUN_IDS" ]; then
-            echo "✅ 没有找到已完成的历史运行记录。"
-            exit 0
-          fi
-
-          TOTAL=$(echo "$RUN_IDS" | wc -l)
-          echo "📊 已完成运行总数: $TOTAL"
-
-          if [ "$TOTAL" -le "$KEEP" ]; then
-            echo "✅ 运行记录总数 ($TOTAL) 未超过保留数 ($KEEP)，无需删除。"
-            exit 0
-          fi
-
-          # 计算需要删除的ID（跳过前KEEP个）
-          DELETE_IDS=$(echo "$RUN_IDS" | tail -n +$((KEEP+1)))
-
-          echo "🗑️ 准备删除以下运行ID（共 $(echo "$DELETE_IDS" | wc -l) 个）:"
-          echo "$DELETE_IDS"
-
-          # 逐个删除
-          for ID in $DELETE_IDS; do
-            echo "正在删除 $ID ..."
-            DELETE_URL="https://api.github.com/repos/$REPO/actions/runs/$ID"
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE -H "Authorization: token $GITHUB_TOKEN" "$DELETE_URL")
-            if [ "$STATUS" = "204" ]; then
-              echo "✅ 删除成功"
-            else
-              echo "⚠️ 删除失败 (HTTP $STATUS)，可能已不存在或权限不足"
-            fi
-          done
-
-          echo "✅ 清理完成。"
-      # ============================================================================
+            for (const run of runsToDelete) {
+              // 避免误删当前正在运行的记录（虽然它应该在前 5 条内）
+              if (run.id === current_run_id) {
+                console.log(`Skipping current run ${run.id}`);
+                continue;
+              }
+              console.log(`Deleting run ${run.id} from ${run.created_at}`);
+              await github.rest.actions.deleteWorkflowRun({
+                owner,
+                repo,
+                run_id: run.id
+              });
+            }
