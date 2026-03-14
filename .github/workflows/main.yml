@@ -8,10 +8,14 @@ on:
       - master
       - dev
       - gd
+
 jobs:
   push:
     runs-on: ${{ matrix.operating-system }}
     timeout-minutes: 120
+    permissions:
+      actions: write      # 允许删除 workflow 运行记录
+      contents: write     # 允许推送代码
     strategy:
       matrix:
         operating-system: [ 'ubuntu-latest' ]
@@ -19,15 +23,18 @@ jobs:
       - name: Set branch name
         id: vars
         run: echo "BRANCH_NAME=${{ github.repository_owner == 'Guovin' && 'gd' || 'master' }}" >> $GITHUB_ENV
+
       - uses: actions/checkout@v3
         with:
           ref: ${{ env.BRANCH_NAME }}
+
       - name: Run with setup-python 3.13
         uses: actions/setup-python@v4
         with:
           python-version: '3.13'
           update-environment: true
           cache: 'pipenv'
+
       - name: Check open_driver config
         id: check_driver
         run: |
@@ -38,25 +45,33 @@ jobs:
           except:
             open_driver = False
           print(open_driver)')" >> $GITHUB_ENV
+
       - name: Set up Chrome
         if: env.OPEN_DRIVER == 'True'
         uses: browser-actions/setup-chrome@latest
         with:
           chrome-version: stable
+
       - name: Download chrome driver
         if: env.OPEN_DRIVER == 'True'
         uses: nanasess/setup-chromedriver@master
+
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
       - name: Install pipenv
         run: pip3 install --user pipenv
-      - name: Install dependecies
+
+      - name: Install dependencies
         run: pipenv --python 3.13 && pipenv install --deploy
+
       - name: Install selenium
         if: env.OPEN_DRIVER == 'True'
         run: pipenv install selenium
+
       - name: Update
         run: pipenv run dev
+
       - name: Commit and push if changed
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
@@ -66,7 +81,8 @@ jobs:
             git commit -m "Github Action Auto Updated"
             git push --force
           fi
-      # 新增：清理旧的 workflow 运行记录，只保留最近的 5 条
+
+      # 清理旧的 workflow 运行记录，只保留最近的 5 条
       - name: Cleanup old workflow runs (keep only 5)
         if: always()
         uses: actions/github-script@v6
@@ -74,16 +90,30 @@ jobs:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const workflow_id = context.workflow;  // 当前 workflow 文件名
             const current_run_id = context.runId;
 
-            console.log(`Fetching runs for workflow ${workflow_id}...`);
+            // 从 GITHUB_WORKFLOW_REF 解析当前工作流文件名
+            const workflowRef = process.env.GITHUB_WORKFLOW_REF;
+            let workflow_id;
+            if (workflowRef) {
+              const match = workflowRef.match(/\.github\/workflows\/(.+?)@/);
+              if (match) {
+                workflow_id = match[1];  // 例如 "update-schedule.yml"
+              }
+            }
+            // 降级方案：如果解析失败，尝试使用 context.workflow（但可能仍是名称，这里保留仅作最后尝试）
+            if (!workflow_id) {
+              workflow_id = context.workflow;
+            }
+
+            console.log(`Using workflow_id: ${workflow_id}`);
+
+            // 分页获取所有运行记录
             let runs = [];
             let page = 1;
             const per_page = 100;
             let response;
 
-            // 分页获取所有运行记录
             do {
               response = await github.rest.actions.listWorkflowRuns({
                 owner,
@@ -104,7 +134,6 @@ jobs:
             console.log(`Total runs: ${runs.length}, keeping 5, deleting ${runsToDelete.length} runs.`);
 
             for (const run of runsToDelete) {
-              // 避免误删当前正在运行的记录（虽然它应该在前 5 条内）
               if (run.id === current_run_id) {
                 console.log(`Skipping current run ${run.id}`);
                 continue;
